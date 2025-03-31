@@ -12,7 +12,7 @@
     "start": "node build/index.js",
     "dev": "npm run build && npm start",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "check-index": "tsc --noEmit --skipLibCheck src/index.ts"
+    "check-index": "tsc --noEmit --skipLibCheck"
   },
   "files": [
     "build"
