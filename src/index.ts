@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
@@ -50,14 +50,17 @@ let nearAccount: Account | null = null;
 let nearProvider: providers.Provider | null = null;
 let nearWallet: WalletConnection | null = null;
 let nearAccountId: string | null = null;
+let implicitAccountId: string | null = null;
 
 async function setupNear() {
   if (nearAccount && nearProvider) return; // Already initialized
 
   try {
-    const { secretKey } = parseSeedPhrase(MNEMONIC as string);
+    const { secretKey, publicKey } = parseSeedPhrase(MNEMONIC as string);
     const keyPair = KeyPair.fromString(secretKey as any);
-    const implicitAccountId = Buffer.from(keyPair.getPublicKey().data).toString("hex");
+    implicitAccountId = Buffer.from(keyPair.getPublicKey().data).toString("hex");
+    console.error(`Derived Implicit Account ID: ${implicitAccountId}`);
+    console.error(`Public Key: ${publicKey}`);
     const keyStore = new keyStores.InMemoryKeyStore();
     await keyStore.setKey(NEAR_NETWORK_ID, implicitAccountId, keyPair);
 
@@ -73,6 +76,7 @@ async function setupNear() {
     nearConnection.connection.signer = nearWallet._keyStore; // Set the signer to the wallet's key store
     nearConnection.connection.networkId = NEAR_NETWORK_ID; // Set the network ID for the connection
     nearAccountId = nearWallet.getAccountId();
+    console.error(`Derived Account ID: ${nearAccountId}`);
     nearAccount = await nearConnection.account(nearAccountId);
     nearProvider = nearConnection.connection.provider;
     console.error(`Connected to NEAR ${NEAR_NETWORK_ID} as ${nearAccountId}`);
@@ -80,6 +84,14 @@ async function setupNear() {
     console.error("Failed to initialize NEAR connection:", error);
     process.exit(1);
   }
+}
+
+/**
+ * Returns the default account ID to use if none is specified.
+ * Falls back to implicit account ID if nearAccountId is not set.
+ */
+function getDefaultAccountId(): string {
+  return nearAccountId || implicitAccountId || '';
 }
 
 function getAccount(): Account {
@@ -157,16 +169,71 @@ server.prompt(
     // This prompt doesn't need arguments, it implies using the server's account
     // The message generated is what the LLM will receive to understand the user's intent.
     // It will then likely call the get_account_balance tool for nearAccountId.
-    if (!nearAccountId) await setupNear(); // Ensure account ID is loaded
+    await setupNear(); // Ensure account ID is loaded
+    const defaultAccount = getDefaultAccountId();
     return {
       messages: [{
         role: "user",
         content: {
           type: "text",
-          text: `What is the current balance breakdown for my account (${nearAccountId})? Please use the get_account_balance tool.`
+          text: `What is the current balance breakdown for my account (${defaultAccount})? Please use the get_account_balance tool.`
         }
       }]
     };
+  }
+);
+
+// --- Resource Implementations ---
+
+// 1. Network Status Resource
+// Provides general status information about the configured NEAR network.
+server.resource(
+  "network-status",
+  // Use a static URI since this doesn't need parameters
+  new ResourceTemplate("near://network-status", {
+    list: async () => ({
+      resources: [{
+        uri: "near://network-status",
+        name: "NEAR Network Status",
+        description: "Provides current block height, hash, and sync status for the configured network.",
+        mimeType: "text/plain"
+      }]
+    })
+  }),
+  async (uri) => {
+    console.error(`Resource: near://network-status requested`);
+    try {
+      await setupNear();
+      const status = await getProvider().status();
+      const syncInfo = status.sync_info;
+
+      const text = `NEAR Network Status (${NEAR_NETWORK_ID}):\n` +
+                 `Chain ID: ${status.chain_id}\n` +
+                 `Latest Block Hash: ${syncInfo.latest_block_hash}\n` +
+                 `Latest Block Height: ${syncInfo.latest_block_height}\n` +
+                 `Latest State Root: ${syncInfo.latest_state_root}\n` +
+                 `Latest Block Time: ${new Date(syncInfo.latest_block_time).toISOString()}\n` +
+                 `Syncing: ${syncInfo.syncing}`;
+
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'text/plain',
+          text: text,
+        }]
+      };
+    } catch (error) {
+      console.error('Error fetching network status:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      return {
+          isError: true,
+          contents: [{
+              uri: uri.href,
+              mimeType: 'text/plain',
+              text: `Failed to fetch NEAR network status. Reason: ${errorMessage}`,
+          }]
+      };
+    }
   }
 );
 
@@ -177,18 +244,36 @@ server.tool(
   "get_account_balance",
   "Get the balance of a specific NEAR account.",
   {
-    accountId: z.string().describe("The NEAR account ID (e.g., example.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet)"),
   },
   async ({ accountId }) => {
-    console.error(`Tool: get_account_balance called for ${accountId}`);
+    const targetAccount = accountId || getDefaultAccountId();
+    console.error(`Tool: get_account_balance called for ${targetAccount}`);
     try {
       await setupNear(); // Ensure connection is ready
-      const balance = await getAccount().getAccountBalance(); // Use pre-configured account for simplicity or allow target account ID
+      // If it's our own account, use the already initialized account
+      // Otherwise, query the network for the target account
+      let balance;
+      if (targetAccount === nearAccountId) {
+        balance = await getAccount().getAccountBalance();
+      } else {
+        const state = await getProvider().query({
+          request_type: "view_account",
+          finality: "optimistic",
+          account_id: targetAccount,
+        });
+        balance = {
+          total: (state as any).amount,
+          staked: (state as any).locked,
+          available: ((state as any).amount - (state as any).locked).toString(),
+          stateStaked: "0", // Not directly available from view_account
+        };
+      }
 
       return {
         content: [{
           type: "text",
-          text: `Balance for ${accountId}:\n` +
+          text: `Balance for ${targetAccount}:\n` +
                 `  Total: ${formatNear(balance.total)} NEAR\n` +
                 `  Staked: ${formatNear(balance.staked)} NEAR\n` +
                 `  State Staked: ${formatNear(balance.stateStaked)} NEAR\n` +
@@ -196,10 +281,10 @@ server.tool(
         }],
       };
     } catch (error: any) {
-      console.error(`Error fetching balance for ${accountId}:`, error);
-      let errorMessage = `Failed to fetch balance for ${accountId}.`;
+      console.error(`Error fetching balance for ${targetAccount}:`, error);
+      let errorMessage = `Failed to fetch balance for ${targetAccount}.`;
       if (error.type === 'AccountDoesNotExist') {
-        errorMessage = `Account ${accountId} does not exist on ${NEAR_NETWORK_ID}.`;
+        errorMessage = `Account ${targetAccount} does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.message) {
         errorMessage += ` Reason: ${error.message}`;
       }
@@ -213,17 +298,18 @@ server.tool(
   "view_account_state",
   "View the raw key-value state stored in a NEAR account's contract. Prefix is expected in base64.",
   {
-    accountId: z.string().describe("The NEAR account ID of the contract (e.g., guest-book.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID of the contract (e.g., guest-book.testnet)"),
     prefix_base64: z.string().optional().describe("Base64 encoded prefix for the keys to view (optional, default views all state). Empty string for no prefix."),
   },
   async ({ accountId, prefix_base64 = "" }) => {
-    console.error(`Tool: view_account_state called for ${accountId} with base64 prefix "${prefix_base64}"`);
+    const targetAccount = accountId || getDefaultAccountId();
+    console.error(`Tool: view_account_state called for ${targetAccount} with base64 prefix "${prefix_base64}"`);
     try {
       await setupNear();
       const response = await getProvider().query({
         request_type: "view_state",
         finality: "optimistic",
-        account_id: accountId,
+        account_id: targetAccount,
         prefix_base64: prefix_base64, // Provider expects base64
       });
 
@@ -232,7 +318,7 @@ server.tool(
         return {
           content: [{
             type: "text",
-            text: `Account ${accountId} has no contract state${prefix_base64 ? ` matching the prefix` : ''}. It might not have a contract deployed.`,
+            text: `Account ${targetAccount} has no contract state${prefix_base64 ? ` matching the prefix` : ''}. It might not have a contract deployed.`,
           }],
         };
       }
@@ -261,17 +347,17 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `Contract state for ${accountId}${prefixText}:\n${formattedState}`,
+          text: `Contract state for ${targetAccount}${prefixText}:\n${formattedState}`,
         }],
       };
 
     } catch (error: any) {
-      console.error(`Error fetching state for ${accountId}:`, error);
-      let errorMessage = `Failed to fetch state for ${accountId}.`;
+      console.error(`Error fetching state for ${targetAccount}:`, error);
+      let errorMessage = `Failed to fetch state for ${targetAccount}.`;
        if (error.type === 'AccountDoesNotExist') {
-        errorMessage = `Account ${accountId} does not exist on ${NEAR_NETWORK_ID}.`;
+        errorMessage = `Account ${targetAccount} does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.type === 'CONTRACT_CODE_NOT_FOUND' || (error.cause && error.cause.name === 'CONTRACT_CODE_NOT_FOUND')) {
-        errorMessage = `Account ${accountId} does not have a contract deployed.`;
+        errorMessage = `Account ${targetAccount} does not have a contract deployed.`;
       } else if (error.message) {
         errorMessage += ` Reason: ${error.message}`;
       }
@@ -285,17 +371,18 @@ server.tool(
   "get_account_details",
   "Get detailed information about a NEAR account, including balance and storage usage.",
   {
-    accountId: z.string().describe("The NEAR account ID (e.g., example.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet)"),
   },
   async ({ accountId }) => {
-    console.error(`Tool: get_account_details called for ${accountId}`);
+    const targetAccount = accountId || getDefaultAccountId();
+    console.error(`Tool: get_account_details called for ${targetAccount}`);
     try {
       await setupNear();
       // Use the provider directly for view_account as it might be a different account
       const state = await getProvider().query({
         request_type: "view_account",
         finality: "optimistic",
-        account_id: accountId,
+        account_id: targetAccount,
       });
 
       // Note: getAccountBalance() might be more comprehensive for the *server's* account,
@@ -303,7 +390,7 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `Account details for ${accountId}:\n` +
+          text: `Account details for ${targetAccount}:\n` +
                 `  Amount (Balance): ${formatNear((state as any).amount)} NEAR\n` +
                 `  Locked (Staked): ${formatNear((state as any).locked)} NEAR\n` +
                 `  Storage Usage: ${(state as any).storage_usage} bytes\n` +
@@ -311,10 +398,10 @@ server.tool(
         }],
       };
     } catch (error: any) {
-      console.error(`Error fetching details for ${accountId}:`, error);
-      let errorMessage = `Failed to fetch details for ${accountId}.`;
+      console.error(`Error fetching details for ${targetAccount}:`, error);
+      let errorMessage = `Failed to fetch details for ${targetAccount}.`;
       if (error.type === 'AccountDoesNotExist') {
-        errorMessage = `Account ${accountId} does not exist on ${NEAR_NETWORK_ID}.`;
+        errorMessage = `Account ${targetAccount} does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.message) {
         errorMessage += ` Reason: ${error.message}`;
       }
@@ -436,21 +523,22 @@ server.tool(
   "call_function",
   "Call a function (change method) on a specified contract.",
   {
-    contractId: z.string().describe("The NEAR account ID of the contract."),
+    contractId: z.string().optional().describe("The NEAR account ID of the contract."),
     methodName: z.string().describe("The name of the function to call."),
     args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {})."),
     gasTeras: z.string().optional().describe("Amount of Gas (in TeraGas, TGas) to attach (e.g., '30'). Default: 30 TGas."),
     attachedDepositNear: z.string().optional().describe("Amount of NEAR to attach as deposit (e.g., '0.1'). Default: 0 NEAR."),
   },
   async ({ contractId, methodName, args = {}, gasTeras = "30", attachedDepositNear = "0" }) => {
-    console.error(`Tool: call_function called: ${contractId}.${methodName}(${JSON.stringify(args)})`);
+    const targetContract = contractId || getDefaultAccountId();
+    console.error(`Tool: call_function called: ${targetContract}.${methodName}(${JSON.stringify(args)})`);
     try {
       await setupNear();
       const gas = BigInt(gasTeras) * BigInt(10**12);
       const amountYocto = parseNear(attachedDepositNear);
 
       const result = await getAccount().functionCall({
-          contractId,
+          contractId: targetContract,
           methodName,
           args,
           gas: gas,
@@ -473,16 +561,16 @@ server.tool(
       return {
         content: [{
           type: "text",
-          text: `Successfully called ${methodName} on ${contractId}. Result: ${typeof resultValue === 'object' ? JSON.stringify(resultValue, null, 2) : resultValue}. Transaction hash: ${result.transaction.hash}`,
+          text: `Successfully called ${methodName} on ${targetContract}. Result: ${typeof resultValue === 'object' ? JSON.stringify(resultValue, null, 2) : resultValue}. Transaction hash: ${result.transaction.hash}`,
         }],
       };
     } catch (error: any) {
-      console.error(`Error calling function ${contractId}.${methodName}:`, error);
-      let errorMessage = `Failed to call function ${methodName} on ${contractId}.`;
+      console.error(`Error calling function ${targetContract}.${methodName}:`, error);
+      let errorMessage = `Failed to call function ${methodName} on ${targetContract}.`;
       if (error.type === 'AccountDoesNotExist') {
-        errorMessage = `Contract account ${contractId} does not exist on ${NEAR_NETWORK_ID}.`;
+        errorMessage = `Contract account ${targetContract} does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.type === 'MethodNotFound' || (error.cause && error.cause.name === 'METHOD_NOT_FOUND')) {
-          errorMessage = `Method "${methodName}" not found on contract ${contractId}.`;
+          errorMessage = `Method "${methodName}" not found on contract ${targetContract}.`;
       } else if (error.message) {
         errorMessage += ` Reason: ${error.message}`;
       }
@@ -499,7 +587,7 @@ server.tool(
 const actionSchema = z.union([
     z.object({ type: z.literal('CreateAccount') }),
     z.object({ type: z.literal('DeployContract'), wasmBase64: z.string().describe("Base64 encoded WASM contract code.") }),
-    z.object({ type: z.literal('FunctionCall'), contractId: z.string(), methodName: z.string(), args: z.record(z.unknown()).optional(), gasTeras: z.string().optional(), depositNear: z.string().optional() }),
+    z.object({ type: z.literal('FunctionCall'), contractId: z.string().optional(), methodName: z.string(), args: z.record(z.unknown()).optional(), gasTeras: z.string().optional(), depositNear: z.string().optional() }),
     z.object({ type: z.literal('Transfer'), depositNear: z.string() }),
     z.object({ type: z.literal('Stake'), stakeYocto: z.string(), publicKey: z.string() }),
     z.object({ type: z.literal('AddKey'), publicKey: z.string(), accessKey: z.object({ nonce: z.number().int().optional(), permission: z.union([ z.literal('FullAccess'), z.object({ receiverId: z.string(), methodNames: z.array(z.string()), allowanceNear: z.string().optional() }) ]) }) }),
@@ -515,7 +603,7 @@ server.tool(
         actions: z.array(actionSchema).min(1).describe("An array of action objects to execute in sequence.")
     },
     async ({ receiverId, actions }) => {
-        const targetReceiverId = receiverId || nearAccountId;
+        const targetReceiverId = receiverId || getDefaultAccountId();
         console.error(`Tool: batch_actions called for receiver ${targetReceiverId} with ${actions.length} actions`);
         try {
             await setupNear();
@@ -529,7 +617,8 @@ server.tool(
                         const args = actionDef.args ? encodeArgs(actionDef.args) : Buffer.from('');
                         const gas = BigInt(actionDef.gasTeras || "30") * BigInt(10**12);
                         const deposit = actionDef.depositNear ? BigInt(parseNear(actionDef.depositNear)) : BigInt(0);
-                        return transactions.functionCall(actionDef.methodName, args, gas, deposit);
+                        const functionCallContractId = actionDef.contractId || getDefaultAccountId();
+                        return transactions.functionCall(actionDef.methodName, args, gas, deposit, functionCallContractId);
                     case 'Transfer':
                          const transferDeposit = BigInt(parseNear(actionDef.depositNear));
                         return transactions.transfer(transferDeposit);
@@ -624,19 +713,20 @@ server.tool(
     "view_function",
     "Call a view-only function on a specified contract (does not change state, does not cost gas beyond RPC fees).",
     {
-        contractId: z.string().describe("The NEAR account ID of the contract."),
+        contractId: z.string().optional().describe("The NEAR account ID of the contract."),
         methodName: z.string().describe("The name of the view function to call."),
         args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {}).")
     },
     async ({ contractId, methodName, args = {} }) => {
-        console.error(`Tool: view_function called: ${contractId}.${methodName}(${JSON.stringify(args)})`);
+        const targetContract = contractId || getDefaultAccountId();
+        console.error(`Tool: view_function called: ${targetContract}.${methodName}(${JSON.stringify(args)})`);
         try {
             await setupNear();
              // Use provider directly for view calls
             const result = await getProvider().query({
                 request_type: "call_function",
                 finality: "optimistic",
-                account_id: contractId,
+                account_id: targetContract,
                 method_name: methodName,
                 args_base64: encodeArgs(args).toString('base64')
             });
@@ -651,18 +741,18 @@ server.tool(
             return {
                 content: [{
                     type: "text",
-                    text: `Result of calling ${methodName} on ${contractId}: ${typeof resultValue === 'object' ? JSON.stringify(resultValue, null, 2) : resultValue}`,
+                    text: `Result of calling ${methodName} on ${targetContract}: ${typeof resultValue === 'object' ? JSON.stringify(resultValue, null, 2) : resultValue}`,
                 }],
             };
         } catch (error: any) {
-            console.error(`Error viewing function ${contractId}.${methodName}:`, error);
-            let errorMessage = `Failed to view function ${methodName} on ${contractId}.`;
+            console.error(`Error viewing function ${targetContract}.${methodName}:`, error);
+            let errorMessage = `Failed to view function ${methodName} on ${targetContract}.`;
              if (error.type === 'AccountDoesNotExist') {
-                 errorMessage = `Contract account ${contractId} does not exist on ${NEAR_NETWORK_ID}.`;
+                 errorMessage = `Contract account ${targetContract} does not exist on ${NEAR_NETWORK_ID}.`;
              } else if (error.type === 'CONTRACT_CODE_NOT_FOUND' || (error.cause && error.cause.name === 'CONTRACT_CODE_NOT_FOUND')) {
-                 errorMessage = `Account ${contractId} does not have a contract deployed.`;
+                 errorMessage = `Account ${targetContract} does not have a contract deployed.`;
              } else if (error.type === 'METHOD_NOT_FOUND' || (error.cause && error.cause.name === 'METHOD_NOT_FOUND')) {
-                 errorMessage = `Method "${methodName}" not found on contract ${contractId}.`;
+                 errorMessage = `Method "${methodName}" not found on contract ${targetContract}.`;
              } else if (error.message) {
                 errorMessage += ` Reason: ${error.message}`;
             }
