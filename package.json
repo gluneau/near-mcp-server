@@ -11,7 +11,8 @@
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
     "start": "node build/index.js",
     "dev": "npm run build && npm start",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "check-index": "tsc --noEmit --skipLibCheck src/index.ts"
   },
   "files": [
     "build"

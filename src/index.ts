@@ -15,7 +15,7 @@ import {
   ConnectConfig,
 } from "near-api-js";
 import { parseSeedPhrase } from 'near-seed-phrase';
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 import { Buffer } from 'buffer';
 import { PublicKey } from "near-api-js/lib/utils/key_pair.js";
 
@@ -58,7 +58,7 @@ async function setupNear() {
 
   try {
     const { secretKey } = parseSeedPhrase(MNEMONIC as string);
-    const keyPair = KeyPair.fromString(secretKey);
+    const keyPair = KeyPair.fromString(secretKey as any);
     const keyStore = new keyStores.InMemoryKeyStore();
     await keyStore.setKey(NEAR_NETWORK_ID, NEAR_ACCOUNT_ID, keyPair);
 
@@ -117,8 +117,9 @@ function formatNear(yoctoString: string): string {
 function encodeArgs(args: any): Buffer {
   try {
     return Buffer.from(JSON.stringify(args));
-  } catch (e) {
-    throw new Error(`Failed to encode arguments: ${e.message}`);
+  } catch (e: unknown) {
+    const error = e as Error;
+    throw new Error(`Failed to encode arguments: ${error.message || 'Unknown error'}`);
   }
 }
 
@@ -149,9 +150,9 @@ function base64ByteLength(str: string): number {
 server.tool(
   "get_account_balance",
   "Get the balance of a specific NEAR account.",
-  z.object({
+  {
     accountId: z.string().describe("The NEAR account ID (e.g., example.testnet)"),
-  }),
+  },
   async ({ accountId }) => {
     console.error(`Tool: get_account_balance called for ${accountId}`);
     try {
@@ -185,10 +186,10 @@ server.tool(
 server.tool(
   "view_account_state",
   "View the raw key-value state stored in a NEAR account's contract. Prefix is expected in base64.",
-  z.object({
+  {
     accountId: z.string().describe("The NEAR account ID of the contract (e.g., guest-book.testnet)"),
     prefix_base64: z.string().optional().describe("Base64 encoded prefix for the keys to view (optional, default views all state). Empty string for no prefix."),
-  }),
+  },
   async ({ accountId, prefix_base64 = "" }) => {
     console.error(`Tool: view_account_state called for ${accountId} with base64 prefix "${prefix_base64}"`);
     try {
@@ -200,7 +201,8 @@ server.tool(
         prefix_base64: prefix_base64, // Provider expects base64
       });
 
-      if (!response.values || response.values.length === 0) {
+      const values = (response as any).values;
+      if (!values || values.length === 0) {
         return {
           content: [{
             type: "text",
@@ -210,7 +212,7 @@ server.tool(
       }
 
       // Decode keys and values from base64
-      const decodedState = response.values.map(({ key, value }) => {
+      const decodedState = (response as any).values.map(({ key, value }: { key: string, value: string }) => {
           let decodedKey : string;
           let decodedValue: string;
           try {
@@ -227,7 +229,7 @@ server.tool(
       });
 
       // Format for better readability
-      const formattedState = decodedState.map(item => `  Key: ${item.key}\n  Value: ${item.value}`).join('\n---\n');
+      const formattedState = decodedState.map((item: {key: string, value: string}) => `  Key: ${item.key}\n  Value: ${item.value}`).join('\n---\n');
       const prefixText = prefix_base64 ? ` (prefix base64: "${prefix_base64}")` : '';
 
       return {
@@ -256,9 +258,9 @@ server.tool(
 server.tool(
   "get_account_details",
   "Get detailed information about a NEAR account, including balance and storage usage.",
-  z.object({
+  {
     accountId: z.string().describe("The NEAR account ID (e.g., example.testnet)"),
-  }),
+  },
   async ({ accountId }) => {
     console.error(`Tool: get_account_details called for ${accountId}`);
     try {
@@ -276,10 +278,10 @@ server.tool(
         content: [{
           type: "text",
           text: `Account details for ${accountId}:\n` +
-                `  Amount (Balance): ${formatNear(state.amount)} NEAR\n` +
-                `  Locked (Staked): ${formatNear(state.locked)} NEAR\n` +
-                `  Storage Usage: ${state.storage_usage} bytes\n` +
-                `  Code Hash: ${state.code_hash}`
+                `  Amount (Balance): ${formatNear((state as any).amount)} NEAR\n` +
+                `  Locked (Staked): ${formatNear((state as any).locked)} NEAR\n` +
+                `  Storage Usage: ${(state as any).storage_usage} bytes\n` +
+                `  Code Hash: ${(state as any).code_hash}`
         }],
       };
     } catch (error: any) {
@@ -299,11 +301,11 @@ server.tool(
 server.tool(
   "create_sub_account",
   "Create a new sub-account under the server's configured account.",
-  z.object({
+  {
     newAccountIdSuffix: z.string().describe("The suffix for the new sub-account (e.g., 'sub'). The full ID will be 'suffix.your-account.testnet'."),
     newAccountPublicKey: z.string().describe("The base58 encoded public key for the new account."),
     initialBalanceNear: z.string().describe("The initial balance in NEAR to fund the new account (e.g., '0.1')."),
-  }),
+  },
   async ({ newAccountIdSuffix, newAccountPublicKey, initialBalanceNear }) => {
     const newAccountId = `${newAccountIdSuffix}.${NEAR_ACCOUNT_ID}`;
     console.error(`Tool: create_sub_account called for ${newAccountId}`);
@@ -339,9 +341,9 @@ server.tool(
 server.tool(
   "delete_account",
   "Delete the server's configured account and transfer remaining balance. WARNING: This is irreversible!",
-  z.object({
+  {
     beneficiaryId: z.string().describe("The NEAR account ID to receive the remaining balance."),
-  }),
+  },
   async ({ beneficiaryId }) => {
     console.error(`Tool: delete_account called for ${NEAR_ACCOUNT_ID}, beneficiary: ${beneficiaryId}`);
     try {
@@ -372,10 +374,10 @@ server.tool(
 server.tool(
   "send_tokens",
   "Send NEAR tokens from the server's configured account to another account.",
-  z.object({
+  {
     receiverId: z.string().describe("The NEAR account ID receiving the tokens."),
     amountNear: z.string().describe("The amount of NEAR to send (e.g., '1.5')."),
-  }),
+  },
   async ({ receiverId, amountNear }) => {
     console.error(`Tool: send_tokens called: ${amountNear} NEAR to ${receiverId}`);
     try {
@@ -407,13 +409,13 @@ server.tool(
 server.tool(
   "call_function",
   "Call a function (change method) on a specified contract.",
-  z.object({
+  {
     contractId: z.string().describe("The NEAR account ID of the contract."),
     methodName: z.string().describe("The name of the function to call."),
     args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {})."),
     gasTeras: z.string().optional().describe("Amount of Gas (in TeraGas, TGas) to attach (e.g., '30'). Default: 30 TGas."),
     attachedDepositNear: z.string().optional().describe("Amount of NEAR to attach as deposit (e.g., '0.1'). Default: 0 NEAR."),
-  }),
+  },
   async ({ contractId, methodName, args = {}, gasTeras = "30", attachedDepositNear = "0" }) => {
     console.error(`Tool: call_function called: ${contractId}.${methodName}(${JSON.stringify(args)})`);
     try {
@@ -431,7 +433,8 @@ server.tool(
 
       let resultValue = "void";
       try {
-        const successValue = result.status?.SuccessValue;
+        const status = result.status as any;
+        const successValue = status?.SuccessValue;
         if (successValue) {
             resultValue = Buffer.from(successValue, 'base64').toString();
              // Try parsing as JSON, fallback to raw string
@@ -481,10 +484,10 @@ const actionSchema = z.union([
 server.tool(
     "batch_actions",
     "Execute multiple NEAR actions atomically within a single transaction. Actions are executed in the specified order.",
-    z.object({
+    {
         receiverId: z.string().optional().describe("The primary receiver account ID for the transaction. If omitted, the server's account ID is used. Most actions define their own specific target."),
         actions: z.array(actionSchema).min(1).describe("An array of action objects to execute in sequence.")
-    }),
+    },
     async ({ receiverId, actions }) => {
         const targetReceiverId = receiverId || NEAR_ACCOUNT_ID;
         console.error(`Tool: batch_actions called for receiver ${targetReceiverId} with ${actions.length} actions`);
@@ -555,9 +558,9 @@ server.tool(
 server.tool(
     "deploy_contract",
     "Deploy a WASM smart contract to the server's configured account.",
-    z.object({
+    {
         wasmBase64: z.string().describe("Base64 encoded string of the WASM contract bytecode."),
-    }),
+    },
     async ({ wasmBase64 }) => {
         console.error(`Tool: deploy_contract called for ${NEAR_ACCOUNT_ID}`);
         try {
@@ -594,11 +597,11 @@ server.tool(
 server.tool(
     "view_function",
     "Call a view-only function on a specified contract (does not change state, does not cost gas beyond RPC fees).",
-    z.object({
+    {
         contractId: z.string().describe("The NEAR account ID of the contract."),
         methodName: z.string().describe("The name of the view function to call."),
         args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {}).")
-    }),
+    },
     async ({ contractId, methodName, args = {} }) => {
         console.error(`Tool: view_function called: ${contractId}.${methodName}(${JSON.stringify(args)})`);
         try {
@@ -613,8 +616,8 @@ server.tool(
             });
 
             let resultValue = "[No return value]";
-            if (result.result && result.result.length > 0) {
-                resultValue = Buffer.from(result.result).toString();
+            if ((result as any).result && (result as any).result.length > 0) {
+                resultValue = Buffer.from((result as any).result).toString();
                  // Try parsing as JSON, fallback to raw string
                  try { resultValue = JSON.parse(resultValue); } catch(e) { /* ignore */ }
             }
@@ -649,7 +652,7 @@ server.tool(
 server.tool(
     "get_access_keys",
     "List all access keys associated with the server's configured account.",
-    z.object({}), // No input arguments needed
+    {}, // No input arguments needed
     async () => {
         console.error(`Tool: get_access_keys called for ${NEAR_ACCOUNT_ID}`);
         try {
@@ -660,7 +663,7 @@ server.tool(
                 return { content: [{ type: "text", text: `Account ${NEAR_ACCOUNT_ID} has no access keys.` }] };
             }
 
-            const formattedKeys = keys.map(key => {
+            const formattedKeys = keys.map((key: any) => {
                 let permissionInfo;
                 if (key.access_key.permission === 'FullAccess') {
                     permissionInfo = "  Permission: FullAccess";
@@ -688,9 +691,9 @@ server.tool(
 server.tool(
     "add_full_access_key",
     "Add a new key with full access permissions to the server's configured account.",
-    z.object({
+    {
         publicKey: z.string().describe("The base58 encoded public key to add."),
-    }),
+    },
     async ({ publicKey }) => {
         console.error(`Tool: add_full_access_key called for ${NEAR_ACCOUNT_ID}`);
         try {
@@ -721,12 +724,12 @@ server.tool(
 server.tool(
     "add_function_call_key",
     "Add a new key with limited function call permissions to the server's configured account.",
-    z.object({
+    {
         publicKey: z.string().describe("The base58 encoded public key to add."),
         contractId: z.string().describe("The contract ID this key is allowed to call."),
         methodNames: z.array(z.string()).optional().describe("Array of method names allowed (empty array or omit for any method)."),
         allowanceNear: z.string().optional().describe("Allowance in NEAR for this key (e.g., '0.25'). Omit for no allowance limit.")
-    }),
+    },
     async ({ publicKey, contractId, methodNames = [], allowanceNear }) => {
         console.error(`Tool: add_function_call_key called for ${NEAR_ACCOUNT_ID}, target contract: ${contractId}`);
         try {
@@ -758,9 +761,9 @@ server.tool(
 server.tool(
     "delete_access_key",
     "Delete an existing access key from the server's configured account.",
-    z.object({
+    {
         publicKey: z.string().describe("The base58 encoded public key to delete."),
-    }),
+    },
     async ({ publicKey }) => {
         console.error(`Tool: delete_access_key called for ${NEAR_ACCOUNT_ID}, key: ${publicKey}`);
         try {
@@ -791,11 +794,11 @@ server.tool(
 server.tool(
     "verify_signature",
     "Verify if a message signature is valid for a given public key.",
-    z.object({
+    {
         message: z.string().describe("The message that was signed (provide as plain string)."),
         signatureBase64: z.string().describe("The base64 encoded signature string."),
         publicKey: z.string().describe("The base58 encoded public key to verify against.")
-    }),
+    },
     async ({ message, signatureBase64, publicKey }) => {
          console.error(`Tool: verify_signature called for key: ${publicKey}`);
          try {
