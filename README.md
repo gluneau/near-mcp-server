@@ -51,9 +51,6 @@ npm install near-mcp-server
     # Set to 'testnet' or 'mainnet'
     NEAR_NETWORK_ID="testnet"
 
-    # Replace with the NEAR account ID associated with the MNEMONIC
-    NEAR_ACCOUNT_ID="your-account.testnet"
-
     # Optional: Specify a different RPC node URL if needed
     # NEAR_NODE_URL="https://rpc.testnet.near.org"
     ```
@@ -111,12 +108,10 @@ Keep the terminal running while you use the server with a client. Logs and error
           "args": [
             "/path/to/your/project/near-mcp-server/build/index.js"
           ]
-          // Optional: Pass environment variables directly if needed
-          // "env": {
-          //   "MNEMONIC": "...",
-          //   "NEAR_NETWORK_ID": "testnet",
-          //   "NEAR_ACCOUNT_ID": "your-account.testnet"
-          // }
+          "env": {
+            "MNEMONIC": "...",
+            "NEAR_NETWORK_ID": "testnet"
+          }
         }
       }
     }
@@ -130,7 +125,7 @@ Keep the terminal running while you use the server with a client. Logs and error
 
 Once connected, you can ask Claude to use the NEAR tools:
 
-* `What's the balance of my account ({{NEAR_ACCOUNT_ID}})?`
+* `What's the balance of my account ({{nearAccountId}})?`
 * `Get the account details for vitalik.near`
 * `View the state for contract guest-book.testnet`
 * `Send 0.1 NEAR from my account to friend.testnet`
@@ -140,7 +135,7 @@ Once connected, you can ask Claude to use the NEAR tools:
 * `Show me all access keys for my account`
 * `Add a full access key 'ed25519:...' to my account`
 * `Delete the access key 'ed25519:...' from my account`
-* `Delete my account {{NEAR_ACCOUNT_ID}} and send the funds to 'beneficiary.testnet'` (**Use with extreme caution!**)
+* `Delete my account {{nearAccountId}} and send the funds to 'beneficiary.testnet'` (**Use with extreme caution!**)
 * `Verify the message "test message" against signature "base64..." using public key "ed25519:..."`
 * `Execute these actions in a batch for my account: transfer 0.1 NEAR to bob.testnet, then call method 'increase' on counter.testnet`
 

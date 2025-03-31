@@ -13,6 +13,7 @@ import {
   Account,
   Near,
   ConnectConfig,
+  WalletConnection,
 } from "near-api-js";
 import { parseSeedPhrase } from 'near-seed-phrase';
 import * as dotenv from 'dotenv';
@@ -25,7 +26,6 @@ dotenv.config(); // Load environment variables from .env file
 const {
   MNEMONIC,
   NEAR_NETWORK_ID,
-  NEAR_ACCOUNT_ID,
   NEAR_NODE_URL
 } = process.env;
 
@@ -35,10 +35,6 @@ if (!MNEMONIC) {
 }
 if (!NEAR_NETWORK_ID) {
   console.error("Error: NEAR_NETWORK_ID environment variable is not set (e.g., 'testnet' or 'mainnet').");
-  process.exit(1);
-}
-if (!NEAR_ACCOUNT_ID) {
-  console.error("Error: NEAR_ACCOUNT_ID environment variable is not set (e.g., 'your-account.testnet').");
   process.exit(1);
 }
 
@@ -52,6 +48,8 @@ const NODE_URL = NEAR_NODE_URL || DEFAULT_NODE_URL;
 let nearConnection: Near | null = null;
 let nearAccount: Account | null = null;
 let nearProvider: providers.Provider | null = null;
+let nearWallet: WalletConnection | null = null;
+let nearAccountId: string | null = null;
 
 async function setupNear() {
   if (nearAccount && nearProvider) return; // Already initialized
@@ -59,21 +57,25 @@ async function setupNear() {
   try {
     const { secretKey } = parseSeedPhrase(MNEMONIC as string);
     const keyPair = KeyPair.fromString(secretKey as any);
+    const implicitAccountId = Buffer.from(keyPair.getPublicKey().data).toString("hex");
     const keyStore = new keyStores.InMemoryKeyStore();
-    await keyStore.setKey(NEAR_NETWORK_ID, NEAR_ACCOUNT_ID, keyPair);
+    await keyStore.setKey(NEAR_NETWORK_ID, implicitAccountId, keyPair);
 
     const config: ConnectConfig = {
       // @ts-ignore - Assuming NEAR_NETWORK_ID is validated elsewhere or accepting potential runtime issues if not 'testnet' or 'mainnet'
       networkId: NEAR_NETWORK_ID, // Removed 'as "testnet" | "mainnet"' as @ts-ignore handles the type check suppression
       keyStore: keyStore,
       nodeUrl: NODE_URL,
-      headers: {},
     };
 
     nearConnection = await connect(config);
-    nearAccount = await nearConnection.account(NEAR_ACCOUNT_ID);
+    nearWallet = new WalletConnection(nearConnection, implicitAccountId);
+    nearConnection.connection.signer = nearWallet._keyStore; // Set the signer to the wallet's key store
+    nearConnection.connection.networkId = NEAR_NETWORK_ID; // Set the network ID for the connection
+    nearAccountId = nearWallet.getAccountId();
+    nearAccount = await nearConnection.account(nearAccountId);
     nearProvider = nearConnection.connection.provider;
-    console.error(`Connected to NEAR ${NEAR_NETWORK_ID} as ${NEAR_ACCOUNT_ID}`);
+    console.error(`Connected to NEAR ${NEAR_NETWORK_ID} as ${nearAccountId}`);
   } catch (error) {
     console.error("Failed to initialize NEAR connection:", error);
     process.exit(1);
@@ -143,6 +145,30 @@ function base64ByteLength(str: string): number {
     }
     return (len * 3 / 4) - padding;
 }
+
+// --- Prompt Implementations ---
+
+// 1. Check Own Balance
+server.prompt(
+  "check_my_balance",
+  "Get the current balance details of the configured NEAR account.",
+  {}, // No input arguments needed for this specific prompt
+  async () => {
+    // This prompt doesn't need arguments, it implies using the server's account
+    // The message generated is what the LLM will receive to understand the user's intent.
+    // It will then likely call the get_account_balance tool for nearAccountId.
+    if (!nearAccountId) await setupNear(); // Ensure account ID is loaded
+    return {
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `What is the current balance breakdown for my account (${nearAccountId})? Please use the get_account_balance tool.`
+        }
+      }]
+    };
+  }
+);
 
 // --- Tool Implementations ---
 
@@ -307,7 +333,7 @@ server.tool(
     initialBalanceNear: z.string().describe("The initial balance in NEAR to fund the new account (e.g., '0.1')."),
   },
   async ({ newAccountIdSuffix, newAccountPublicKey, initialBalanceNear }) => {
-    const newAccountId = `${newAccountIdSuffix}.${NEAR_ACCOUNT_ID}`;
+    const newAccountId = `${newAccountIdSuffix}.${nearAccountId}`;
     console.error(`Tool: create_sub_account called for ${newAccountId}`);
     try {
       await setupNear();
@@ -345,21 +371,21 @@ server.tool(
     beneficiaryId: z.string().describe("The NEAR account ID to receive the remaining balance."),
   },
   async ({ beneficiaryId }) => {
-    console.error(`Tool: delete_account called for ${NEAR_ACCOUNT_ID}, beneficiary: ${beneficiaryId}`);
+    console.error(`Tool: delete_account called for ${nearAccountId}, beneficiary: ${beneficiaryId}`);
     try {
       await setupNear();
       const result = await getAccount().deleteAccount(beneficiaryId);
       return {
         content: [{
           type: "text",
-          text: `Successfully submitted request to delete account ${NEAR_ACCOUNT_ID} and transfer remaining balance to ${beneficiaryId}. Transaction hash: ${result.transaction.hash}`,
+          text: `Successfully submitted request to delete account ${nearAccountId} and transfer remaining balance to ${beneficiaryId}. Transaction hash: ${result.transaction.hash}`,
         }],
       };
     } catch (error: any) {
-      console.error(`Error deleting account ${NEAR_ACCOUNT_ID}:`, error);
-      let errorMessage = `Failed to delete account ${NEAR_ACCOUNT_ID}.`;
+      console.error(`Error deleting account ${nearAccountId}:`, error);
+      let errorMessage = `Failed to delete account ${nearAccountId}.`;
        if (error.type === 'DeleteAccountHasEnoughBalance' || error.type === 'DeleteAccountHasRent') {
-           errorMessage = `Account ${NEAR_ACCOUNT_ID} cannot be deleted because it still has enough balance to cover storage. Ensure the balance is near zero.`
+           errorMessage = `Account ${nearAccountId} cannot be deleted because it still has enough balance to cover storage. Ensure the balance is near zero.`
        } else if (error.type === 'AccountDoesNotExist') {
         errorMessage = `Account ${beneficiaryId} (beneficiary) does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.message) {
@@ -396,7 +422,7 @@ server.tool(
       if (error.type === 'AccountDoesNotExist') {
         errorMessage = `Account ${receiverId} does not exist on ${NEAR_NETWORK_ID}.`;
       } else if (error.type === 'NotEnoughBalance') {
-          errorMessage = `Account ${NEAR_ACCOUNT_ID} does not have enough balance to send ${amountNear} NEAR and cover gas fees.`;
+          errorMessage = `Account ${nearAccountId} does not have enough balance to send ${amountNear} NEAR and cover gas fees.`;
       } else if (error.message) {
         errorMessage += ` Reason: ${error.message}`;
       }
@@ -489,7 +515,7 @@ server.tool(
         actions: z.array(actionSchema).min(1).describe("An array of action objects to execute in sequence.")
     },
     async ({ receiverId, actions }) => {
-        const targetReceiverId = receiverId || NEAR_ACCOUNT_ID;
+        const targetReceiverId = receiverId || nearAccountId;
         console.error(`Tool: batch_actions called for receiver ${targetReceiverId} with ${actions.length} actions`);
         try {
             await setupNear();
@@ -562,7 +588,7 @@ server.tool(
         wasmBase64: z.string().describe("Base64 encoded string of the WASM contract bytecode."),
     },
     async ({ wasmBase64 }) => {
-        console.error(`Tool: deploy_contract called for ${NEAR_ACCOUNT_ID}`);
+        console.error(`Tool: deploy_contract called for ${nearAccountId}`);
         try {
             await setupNear();
             const wasmBytes = decodeBase64(wasmBase64);
@@ -571,17 +597,17 @@ server.tool(
              return {
                 content: [{
                     type: "text",
-                    text: `Successfully deployed contract to ${NEAR_ACCOUNT_ID}. Transaction hash: ${result.transaction.hash}`,
+                    text: `Successfully deployed contract to ${nearAccountId}. Transaction hash: ${result.transaction.hash}`,
                 }],
             };
         } catch (error: any) {
-            console.error(`Error deploying contract to ${NEAR_ACCOUNT_ID}:`, error);
-            let errorMessage = `Failed to deploy contract to ${NEAR_ACCOUNT_ID}.`;
+            console.error(`Error deploying contract to ${nearAccountId}:`, error);
+            let errorMessage = `Failed to deploy contract to ${nearAccountId}.`;
              if (error.type === 'ContractSizeExceeded') {
                  errorMessage = `Contract size (${base64ByteLength(wasmBase64)} bytes) exceeds the limit.`;
              } else if (error.type === 'AccountAlreadyExists') {
                  // This shouldn't typically happen for deploy, but good to handle
-                 errorMessage = `Account ${NEAR_ACCOUNT_ID} seems to already exist with code? This might indicate an issue.`;
+                 errorMessage = `Account ${nearAccountId} seems to already exist with code? This might indicate an issue.`;
              } else if (error.message) {
                  errorMessage += ` Reason: ${error.message}`;
              }
@@ -654,13 +680,13 @@ server.tool(
     "List all access keys associated with the server's configured account.",
     {}, // No input arguments needed
     async () => {
-        console.error(`Tool: get_access_keys called for ${NEAR_ACCOUNT_ID}`);
+        console.error(`Tool: get_access_keys called for ${nearAccountId}`);
         try {
             await setupNear();
             const keys = await getAccount().getAccessKeys();
 
             if (!keys || keys.length === 0) {
-                return { content: [{ type: "text", text: `Account ${NEAR_ACCOUNT_ID} has no access keys.` }] };
+                return { content: [{ type: "text", text: `Account ${nearAccountId} has no access keys.` }] };
             }
 
             const formattedKeys = keys.map((key: any) => {
@@ -677,12 +703,12 @@ server.tool(
             return {
                 content: [{
                     type: "text",
-                    text: `Access keys for ${NEAR_ACCOUNT_ID}:\n${formattedKeys}`
+                    text: `Access keys for ${nearAccountId}:\n${formattedKeys}`
                 }],
             };
         } catch (error: any) {
-            console.error(`Error fetching access keys for ${NEAR_ACCOUNT_ID}:`, error);
-            return { isError: true, content: [{ type: "text", text: `Failed to fetch access keys for ${NEAR_ACCOUNT_ID}. Reason: ${error.message}` }] };
+            console.error(`Error fetching access keys for ${nearAccountId}:`, error);
+            return { isError: true, content: [{ type: "text", text: `Failed to fetch access keys for ${nearAccountId}. Reason: ${error.message}` }] };
         }
     }
 );
@@ -695,7 +721,7 @@ server.tool(
         publicKey: z.string().describe("The base58 encoded public key to add."),
     },
     async ({ publicKey }) => {
-        console.error(`Tool: add_full_access_key called for ${NEAR_ACCOUNT_ID}`);
+        console.error(`Tool: add_full_access_key called for ${nearAccountId}`);
         try {
             await setupNear();
             const pubKey = PublicKey.fromString(publicKey);
@@ -704,14 +730,14 @@ server.tool(
             return {
                 content: [{
                     type: "text",
-                    text: `Successfully added full access key ${publicKey} to ${NEAR_ACCOUNT_ID}. Transaction hash: ${result.transaction.hash}`,
+                    text: `Successfully added full access key ${publicKey} to ${nearAccountId}. Transaction hash: ${result.transaction.hash}`,
                 }],
             };
         } catch (error: any) {
-            console.error(`Error adding full access key ${publicKey} to ${NEAR_ACCOUNT_ID}:`, error);
-            let errorMessage = `Failed to add full access key ${publicKey} to ${NEAR_ACCOUNT_ID}.`;
+            console.error(`Error adding full access key ${publicKey} to ${nearAccountId}:`, error);
+            let errorMessage = `Failed to add full access key ${publicKey} to ${nearAccountId}.`;
              if (error.type === 'AddKeyAlreadyExists') {
-                 errorMessage = `Public key ${publicKey} already exists for account ${NEAR_ACCOUNT_ID}.`;
+                 errorMessage = `Public key ${publicKey} already exists for account ${nearAccountId}.`;
              } else if (error.message) {
                 errorMessage += ` Reason: ${error.message}`;
             }
@@ -731,7 +757,7 @@ server.tool(
         allowanceNear: z.string().optional().describe("Allowance in NEAR for this key (e.g., '0.25'). Omit for no allowance limit.")
     },
     async ({ publicKey, contractId, methodNames = [], allowanceNear }) => {
-        console.error(`Tool: add_function_call_key called for ${NEAR_ACCOUNT_ID}, target contract: ${contractId}`);
+        console.error(`Tool: add_function_call_key called for ${nearAccountId}, target contract: ${contractId}`);
         try {
             await setupNear();
             const pubKey = PublicKey.fromString(publicKey);
@@ -741,14 +767,14 @@ server.tool(
             return {
                 content: [{
                     type: "text",
-                    text: `Successfully added function call access key ${publicKey} to ${NEAR_ACCOUNT_ID} for contract ${contractId}. Transaction hash: ${result.transaction.hash}`,
+                    text: `Successfully added function call access key ${publicKey} to ${nearAccountId} for contract ${contractId}. Transaction hash: ${result.transaction.hash}`,
                 }],
             };
         } catch (error: any) {
-            console.error(`Error adding function call key ${publicKey} to ${NEAR_ACCOUNT_ID}:`, error);
-            let errorMessage = `Failed to add function call key ${publicKey} to ${NEAR_ACCOUNT_ID}.`;
+            console.error(`Error adding function call key ${publicKey} to ${nearAccountId}:`, error);
+            let errorMessage = `Failed to add function call key ${publicKey} to ${nearAccountId}.`;
              if (error.type === 'AddKeyAlreadyExists') {
-                 errorMessage = `Public key ${publicKey} already exists for account ${NEAR_ACCOUNT_ID}.`;
+                 errorMessage = `Public key ${publicKey} already exists for account ${nearAccountId}.`;
              } else if (error.message) {
                  errorMessage += ` Reason: ${error.message}`;
              }
@@ -765,7 +791,7 @@ server.tool(
         publicKey: z.string().describe("The base58 encoded public key to delete."),
     },
     async ({ publicKey }) => {
-        console.error(`Tool: delete_access_key called for ${NEAR_ACCOUNT_ID}, key: ${publicKey}`);
+        console.error(`Tool: delete_access_key called for ${nearAccountId}, key: ${publicKey}`);
         try {
             await setupNear();
             const pubKey = PublicKey.fromString(publicKey);
@@ -774,14 +800,14 @@ server.tool(
             return {
                 content: [{
                     type: "text",
-                    text: `Successfully deleted access key ${publicKey} from ${NEAR_ACCOUNT_ID}. Transaction hash: ${result.transaction.hash}`,
+                    text: `Successfully deleted access key ${publicKey} from ${nearAccountId}. Transaction hash: ${result.transaction.hash}`,
                 }],
             };
         } catch (error: any) {
-            console.error(`Error deleting key ${publicKey} from ${NEAR_ACCOUNT_ID}:`, error);
-            let errorMessage = `Failed to delete access key ${publicKey} from ${NEAR_ACCOUNT_ID}.`;
+            console.error(`Error deleting key ${publicKey} from ${nearAccountId}:`, error);
+            let errorMessage = `Failed to delete access key ${publicKey} from ${nearAccountId}.`;
              if (error.type === 'DeleteKeyDoesNotExist') {
-                 errorMessage = `Public key ${publicKey} does not exist for account ${NEAR_ACCOUNT_ID}.`;
+                 errorMessage = `Public key ${publicKey} does not exist for account ${nearAccountId}.`;
              } else if (error.message) {
                  errorMessage += ` Reason: ${error.message}`;
              }
