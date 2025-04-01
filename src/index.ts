@@ -244,7 +244,7 @@ server.tool(
   "get_account_balance",
   "Get the balance of a specific NEAR account.",
   {
-    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet). If not provided, the DefaultAccountId will be used."),
   },
   async ({ accountId }) => {
     const targetAccount = accountId || getDefaultAccountId();
@@ -298,7 +298,7 @@ server.tool(
   "view_account_state",
   "View the raw key-value state stored in a NEAR account's contract. Prefix is expected in base64.",
   {
-    accountId: z.string().optional().describe("The NEAR account ID of the contract (e.g., guest-book.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID of the contract (e.g., guest-book.testnet). If not provided, the DefaultAccountId will be used."),
     prefix_base64: z.string().optional().describe("Base64 encoded prefix for the keys to view (optional, default views all state). Empty string for no prefix."),
   },
   async ({ accountId, prefix_base64 = "" }) => {
@@ -371,7 +371,7 @@ server.tool(
   "get_account_details",
   "Get detailed information about a NEAR account, including balance and storage usage.",
   {
-    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet)"),
+    accountId: z.string().optional().describe("The NEAR account ID (e.g., example.testnet). If not provided, the DefaultAccountId will be used."),
   },
   async ({ accountId }) => {
     const targetAccount = accountId || getDefaultAccountId();
@@ -523,7 +523,7 @@ server.tool(
   "call_function",
   "Call a function (change method) on a specified contract.",
   {
-    contractId: z.string().optional().describe("The NEAR account ID of the contract."),
+    contractId: z.string().optional().describe("The NEAR account ID of the contract. If not provided, the DefaultAccountId will be used."),
     methodName: z.string().describe("The name of the function to call."),
     args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {})."),
     gasTeras: z.string().optional().describe("Amount of Gas (in TeraGas, TGas) to attach (e.g., '30'). Default: 30 TGas."),
@@ -599,7 +599,7 @@ server.tool(
     "batch_actions",
     "Execute multiple NEAR actions atomically within a single transaction. Actions are executed in the specified order.",
     {
-        receiverId: z.string().optional().describe("The primary receiver account ID for the transaction. If omitted, the server's account ID is used. Most actions define their own specific target."),
+        receiverId: z.string().optional().describe("The primary receiver account ID for the transaction. If not provided, the DefaultAccountId will be used. Most actions define their own specific target."),
         actions: z.array(actionSchema).min(1).describe("An array of action objects to execute in sequence.")
     },
     async ({ receiverId, actions }) => {
@@ -713,7 +713,7 @@ server.tool(
     "view_function",
     "Call a view-only function on a specified contract (does not change state, does not cost gas beyond RPC fees).",
     {
-        contractId: z.string().optional().describe("The NEAR account ID of the contract."),
+        contractId: z.string().optional().describe("The NEAR account ID of the contract. If not provided, the DefaultAccountId will be used."),
         methodName: z.string().describe("The name of the view function to call."),
         args: z.record(z.unknown()).optional().describe("Arguments for the function call as a JSON object (default: {}).")
     },
